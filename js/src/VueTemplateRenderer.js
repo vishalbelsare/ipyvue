@@ -75,7 +75,9 @@ function createComponentObject(model, parentView) {
     return {
         inject: ['viewCtx'],
         data() {
-            return { ...data, ...createDataMapping(model) };
+            // data that is only used in the template, and not synced with the backend/model
+            const dataTemplate = (vuefile.SCRIPT && vuefile.SCRIPT.data && vuefile.SCRIPT.data()) || {};
+            return { ...data, ...dataTemplate, ...createDataMapping(model) };
         },
         beforeCreate() {
             callVueFn('beforeCreate', this);
@@ -100,7 +102,9 @@ function createComponentObject(model, parentView) {
             ...createFullVueComponents(fullVueComponents),
         },
         computed: { ...vuefile.SCRIPT && vuefile.SCRIPT.computed, ...aliasRefProps(model) },
-        template: vuefile.TEMPLATE || template,
+        template: vuefile.TEMPLATE === undefined && vuefile.SCRIPT === undefined && vuefile.STYLE === undefined
+            ? template
+            : vuefile.TEMPLATE,
         beforeMount() {
             callVueFn('beforeMount', this);
         },
@@ -161,27 +165,30 @@ function addModelListeners(model, vueModel) {
 }
 
 function createWatches(model, parentView, templateWatchers) {
-    return model.keys()
-        .filter(prop => !prop.startsWith('_')
-            && !['events', 'template', 'components', 'layout', 'css', 'data', 'methods'].includes(prop))
-        .reduce((result, prop) => ({
-            ...result,
-            [prop]: {
-                handler(value) {
-                    if (templateWatchers && templateWatchers[prop]) {
-                        templateWatchers[prop].bind(this)(value);
-                    }
-                    /* Don't send changes received from backend back */
-                    if (_.isEqual(value, model.get(prop))) {
-                        return;
-                    }
+    const modelWatchers = model.keys().filter(prop => !prop.startsWith('_')
+    && !['events', 'template', 'components', 'layout', 'css', 'data', 'methods'].includes(prop))
+    .reduce((result, prop) => ({
+        ...result,
+        [prop]: {
+            handler(value) {
+                if (templateWatchers && templateWatchers[prop]) {
+                    templateWatchers[prop].bind(this)(value);
+                }
+                /* Don't send changes received from backend back */
+                if (_.isEqual(value, model.get(prop))) {
+                    return;
+                }
 
-                    model.set(prop, value === undefined ? null : _.cloneDeep(value));
-                    model.save_changes(model.callbacks(parentView));
-                },
-                deep: true,
+                model.set(prop, value === undefined ? null : _.cloneDeep(value));
+                model.save_changes(model.callbacks(parentView));
             },
-        }), {});
+            deep: true,
+        },
+    }), {})
+    /* Overwritten keys from templateWatchers are handled in modelWatchers
+        so that we eventually call all handlers from templateWatchers. 
+    */
+    return {...templateWatchers, ...modelWatchers};
 }
 
 function createMethods(model, parentView) {

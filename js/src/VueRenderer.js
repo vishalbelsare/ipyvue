@@ -1,16 +1,49 @@
 /* eslint camelcase: ['error', {allow: ['v_model']}] */
-import { JupyterPhosphorWidget } from '@jupyter-widgets/base';
+import * as base from '@jupyter-widgets/base';
 import { vueTemplateRender } from './VueTemplateRenderer'; // eslint-disable-line import/no-cycle
 import { VueModel } from './VueModel';
 import { VueTemplateModel } from './VueTemplateModel';
 import Vue from './VueWithCompiler';
 
+const JupyterPhosphorWidget = base.JupyterPhosphorWidget || base.JupyterLuminoWidget;
+
 export function createObjectForNestedModel(model, parentView) {
+    let currentView =  null;
+    let destroyed = false;
     return {
         mounted() {
             parentView
                 .create_child_view(model)
-                .then(view => JupyterPhosphorWidget.attach(view.pWidget, this.$el));
+                .then(view => {
+                    currentView = view;
+                    // since create view is async, the vue component might be destroyed before the view is created
+                    if(!destroyed) {
+                        if(JupyterPhosphorWidget && (view.pWidget || view.luminoWidget || view.lmWidget)) {
+                            JupyterPhosphorWidget.attach(view.pWidget || view.luminoWidget || view.lmWidget, this.$el);
+                        } else {
+                            console.error("Could not attach widget to DOM using Lumino or Phosphor. Fallback to normal DOM attach", JupyterPhosphorWidget, view.pWidget, view.luminoWidget, view.lmWidget);
+                            this.$el.appendChild(view.el);
+
+                        }
+                    } else {
+                        currentView.remove();
+                    }
+                });
+        },
+        beforeDestroy() {
+            if (currentView) {
+                // In vue 3 we can use the beforeUnmount, which is called before the node is removed from the DOM
+                // In vue 2, we are already disconnected from the document at this stage, which phosphor does not like.
+                // In order to avoid an error in phosphor, we add the node to the body before removing it.
+                // (current.remove triggers a phosphor detach)
+                // To be sure we do not cause any flickering, we hide the node before moving it.
+                const widget = currentView.pWidget || currentView.luminoWidget || currentView.lmWidget;
+                widget.node.style.display = "none";
+                document.body.appendChild(widget.node)
+                currentView.remove();
+            } else {
+                destroyed = true;
+            }
         },
         render(createElement) {
             return createElement('div', { style: { height: '100%' } });
@@ -18,29 +51,34 @@ export function createObjectForNestedModel(model, parentView) {
     };
 }
 
-export function eventToObject(event) {
-    if (event == null) {
-        return event;
-    }
-    let props;
-    switch (event.constructor) {
-        case MouseEvent:
-            props = ['altKey', 'ctrlKey', 'metaKey', 'shiftKey', 'offsetX', 'offsetY', 'clientX', 'clientY', 'pageX', 'pageY', 'screenX', 'screenY', 'shiftKey', 'x', 'y'];
-            break;
-        case WheelEvent:
-            props = ['altKey', 'ctrlKey', 'metaKey', 'shiftKey', 'offsetX', 'offsetY', 'clientX', 'clientY', 'pageX', 'pageY', 'screenX', 'screenY', 'shiftKey', 'x', 'y', 'wheelDelta', 'wheelDeltaX', 'wheelDeltaY'];
-            break;
-        // TODO: More events
-        default:
-            return event;
+// based on https://stackoverflow.com/a/58416333/5397207
+function pickSerializable(object, depth=0, max_depth=2) {
+    // change max_depth to see more levels, for a touch event, 2 is good
+    if (depth > max_depth)
+        return 'Object';
+
+    const obj = {};
+    for (let key in object) {
+        let value = object[key];
+        if (value instanceof Node)
+            // specify which properties you want to see from the node
+            value = {id: value.id};
+        else if (value instanceof Window)
+            value = 'Window';
+        else if (value instanceof Object)
+            value = pickSerializable(value, depth+1, max_depth);
+
+        obj[key] = value;
     }
 
-    return props.reduce(
-        (result, key) => {
-            result[key] = event[key]; // eslint-disable-line no-param-reassign
-            return result;
-        }, {},
-    );
+    return obj;
+}
+
+export function eventToObject(event) {
+    if (event instanceof Event) {
+        return pickSerializable(event);
+    }
+    return event;
 }
 
 export function vueRender(createElement, model, parentView, slotScopes) {
@@ -89,6 +127,9 @@ function addListeners(model, vueModel) {
         .forEach(key => model.on(`change:${key}`, listener));
 
     model.on('change:v_model', () => {
+        if (vueModel.v_model === "!!disabled!!") {
+            vueModel.$forceUpdate();
+        }
         if (model.get('v_model') !== vueModel.v_model) {
             vueModel.v_model = model.get('v_model'); // eslint-disable-line no-param-reassign
         }
